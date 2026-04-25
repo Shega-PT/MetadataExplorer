@@ -31,7 +31,7 @@ A powerful, cross-platform Python tool for deep metadata extraction from various
 
 1. Clone the repository:
 
-   git clone https://github.com/yourusername/metadata-explorer.git
+   git clone https://github.com/Shega-PT/metadata-explorer.git
    cd metadata-explorer
 
 
@@ -115,7 +115,7 @@ Submit Pull Requests - Add support for new file formats or features
 Development Setup
 Clone and install in development mode
 
-git clone https://github.com/yourusername/metadata-explorer.git
+git clone https://github.com/Shega-PT/metadata-explorer.git
 cd metadata-explorer
 pip install -e .
 pip install -r requirements-dev.txt  # Optional dev dependencies
