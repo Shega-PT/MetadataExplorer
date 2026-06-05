@@ -1,351 +1,811 @@
+#!/usr/bin/env python3
 """
-Universal Metadata Extractor - A cross-platform tool for extracting metadata
-from various file types (images, audio, video) with detailed logging.
+Metadata Explorer v2 — Universal Metadata Extractor
+Copyright (C) 2026  ShegaPT
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-import os
-import sys
+import argparse
+import csv
+import json
 import logging
+import os
+import subprocess
+import sys
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
-import exifread
-import mutagen
-from hachoir.metadata import extractMetadata
-from hachoir.parser import createParser
-from PIL import Image, UnidentifiedImageError
+from typing import Dict, Any, Optional, List, Tuple
+
+import argparse
+import csv
+import json
+import logging
+import os
+import subprocess
+import sys
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
+
+# Suppress noisy library warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("exifread").setLevel(logging.ERROR)
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("PyPDF2").setLevel(logging.ERROR)
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 # ============================================================================
-# LOGGING CONFIGURATION
+# Optional Imports with Graceful Degradation
 # ============================================================================
 
-def setup_logging() -> tuple[logging.Logger, logging.Logger]:
-    """
-    Configure dual logging system:
-    - Process logger: Console output for real-time monitoring
-    - Metadata logger: File output for detailed metadata reports
-    
-    Returns:
-        tuple: (process_logger, metadata_logger)
-    """
-    # Metadata logger (writes to file)
-    metadata_handler = logging.FileHandler(
-        'metadata_report.log',
-        encoding='utf-8',
-        mode='w'
-    )
-    metadata_handler.setFormatter(logging.Formatter('%(message)s'))
-    metadata_logger = logging.getLogger('metadata')
-    metadata_logger.setLevel(logging.INFO)
-    metadata_logger.addHandler(metadata_handler)
-    
-    # Process logger (console output)
-    process_handler = logging.StreamHandler()
-    process_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    )
-    process_logger = logging.getLogger('process')
-    process_logger.setLevel(logging.INFO)
-    process_logger.addHandler(process_handler)
-    
-    return process_logger, metadata_logger
+try:
+    import exifread
+except ImportError:
+    exifread = None
+
+try:
+    import mutagen
+except ImportError:
+    mutagen = None
+
+try:
+    from PIL import Image
+
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    except ImportError:
+        pass
+except ImportError:
+    Image = None
+
+try:
+    from hachoir.metadata import extractMetadata
+    from hachoir.parser import createParser
+except ImportError:
+    extractMetadata = None
+    createParser = None
+
+try:
+    from pymediainfo import MediaInfo
+except ImportError:
+    MediaInfo = None
+
+try:
+    import magic
+except ImportError:
+    magic = None
+
+try:
+    import pypdf
+except ImportError:
+    try:
+        import PyPDF2 as pypdf
+    except ImportError:
+        pypdf = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+
+def setup_logging(verbose: bool = False) -> logging.Logger:
+    logger = logging.getLogger("universal_metadata")
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        logger.addHandler(handler)
+    return logger
 
 
 # ============================================================================
 # UNIVERSAL METADATA EXTRACTOR
 # ============================================================================
 
+
 class UniversalMetadataExtractor:
-    """
-    Extracts metadata from various file formats including images, audio, and video.
-    Uses specialized libraries for each file type to maximize metadata extraction.
-    """
-    
-    # File type mappings
-    IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tiff', '.webp', '.heic', '.bmp', '.gif'}
-    AUDIO_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.ogg', '.wav', '.aac', '.wma'}
-    VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm'}
-    
+    IMAGE_EXTENSIONS = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".heic",
+        ".heif",
+        ".bmp",
+        ".gif",
+    }
+    AUDIO_EXTENSIONS = {
+        ".mp3",
+        ".flac",
+        ".m4a",
+        ".ogg",
+        ".wav",
+        ".aac",
+        ".wma",
+        ".opus",
+    }
+    VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v"}
+    DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx"}
+    RAW_EXTENSIONS = {
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".nrw",
+        ".arw",
+        ".dng",
+        ".orf",
+        ".rw2",
+        ".raf",
+    }
+    ALL_EXTENSIONS = (
+        IMAGE_EXTENSIONS
+        | AUDIO_EXTENSIONS
+        | VIDEO_EXTENSIONS
+        | DOCUMENT_EXTENSIONS
+        | RAW_EXTENSIONS
+    )
+
+    TYPE_FILTERS = {
+        "images": IMAGE_EXTENSIONS | RAW_EXTENSIONS,
+        "audio": AUDIO_EXTENSIONS,
+        "video": VIDEO_EXTENSIONS,
+        "documents": DOCUMENT_EXTENSIONS,
+        "all": None,
+    }
+
     @staticmethod
-    def get_image_metadata(file_path: Path) -> Dict[str, Any]:
-        """
-        Extract metadata from image files using exifread.
-        
-        Args:
-            file_path: Path to the image file
-            
-        Returns:
-            Dictionary containing image metadata
-        """
-        metadata = {}
+    def _format_size(size_bytes: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size_bytes < 1024:
+                return f"{size_bytes:.2f} {unit}" if unit != "B" else f"{size_bytes} B"
+            size_bytes /= 1024
+        return f"{size_bytes:.2f} PB"
+
+    @staticmethod
+    def _gps_to_decimal(gps_list, ref: str) -> Optional[float]:
         try:
-            with open(file_path, 'rb') as file:
-                tags = exifread.process_file(file, details=False)
-                for tag, value in tags.items():
-                    if tag not in ['JPEGThumbnail', 'TIFFThumbnail', 'Filename', 'JPEGThumbnail']:
-                        metadata[f"IMG_{tag}"] = str(value)
-        except Exception as e:
-            logging.debug(f"Could not extract image metadata from {file_path}: {e}")
-        
-        return metadata
-    
+            degrees = float(gps_list[0])
+            minutes = float(gps_list[1])
+            seconds = float(gps_list[2])
+            decimal = degrees + minutes / 60.0 + seconds / 3600.0
+            return -decimal if ref in ("S", "W") else decimal
+        except (TypeError, IndexError, ValueError):
+            return None
+
     @staticmethod
-    def get_audio_metadata(file_path: Path) -> Dict[str, Any]:
-        """
-        Extract metadata from audio files using mutagen.
-        
-        Args:
-            file_path: Path to the audio file
-            
-        Returns:
-            Dictionary containing audio metadata
-        """
-        metadata = {}
+    def _seconds_to_hms(seconds: float) -> str:
+        h, r = divmod(int(seconds), 3600)
+        m, s = divmod(r, 60)
+        parts = []
+        if h:
+            parts.append(f"{h}h")
+        if m:
+            parts.append(f"{m}m")
+        parts.append(f"{s}s")
+        return " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # Image metadata
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_image_metadata(cls, file_path: Path) -> Dict[str, Any]:
+        meta = {}
+
+        if Image is not None:
+            try:
+                with Image.open(file_path) as img:
+                    meta["IMG_Format"] = img.format or "Unknown"
+                    meta["IMG_Width"] = str(img.width)
+                    meta["IMG_Height"] = str(img.height)
+                    meta["IMG_Dimensions"] = f"{img.width}x{img.height}"
+                    meta["IMG_Mode"] = img.mode
+                    dpi = img.info.get("dpi")
+                    if dpi and isinstance(dpi, tuple) and len(dpi) == 2:
+                        meta["IMG_DPI"] = f"{dpi[0]:.0f}x{dpi[1]:.0f}"
+            except Exception:
+                pass
+
+        if exifread is not None:
+            try:
+                with open(file_path, "rb") as f:
+                    tags = exifread.process_file(f, details=True)
+                for tag, value in tags.items():
+                    if tag in ("JPEGThumbnail", "TIFFThumbnail", "Filename"):
+                        continue
+                    tag_str = str(value)
+                    if len(tag_str) > 1000:
+                        continue
+                    key = f"IMG_{tag.replace(' ', '_')}"
+
+                    if tag == "GPS GPSLatitude":
+                        ref = str(tags.get("GPS GPSLatitudeRef", "N"))
+                        dec = cls._gps_to_decimal(value.values, ref)
+                        if dec is not None:
+                            meta["IMG_GPS_LatitudeDecimal"] = f"{dec:.6f}"
+                        meta[key] = tag_str
+                    elif tag == "GPS GPSLongitude":
+                        ref = str(tags.get("GPS GPSLongitudeRef", "E"))
+                        dec = cls._gps_to_decimal(value.values, ref)
+                        if dec is not None:
+                            meta["IMG_GPS_LongitudeDecimal"] = f"{dec:.6f}"
+                        meta[key] = tag_str
+                    else:
+                        meta[key] = tag_str
+            except Exception:
+                pass
+
+        return meta
+
+    # ------------------------------------------------------------------
+    # Audio metadata
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_audio_metadata(cls, file_path: Path) -> Dict[str, Any]:
+        meta = {}
+        if mutagen is None:
+            return meta
+
         try:
             audio = mutagen.File(file_path)
-            if audio:
-                # Technical metadata
-                if hasattr(audio, 'info'):
-                    for attr in dir(audio.info):
-                        if not attr.startswith('_') and not callable(getattr(audio.info, attr)):
-                            value = getattr(audio.info, attr)
-                            if value is not None:
-                                metadata[f"AUDIO_TECH_{attr}"] = str(value)
-                
-                # Tag metadata (ID3, Vorbis comments, etc.)
-                if audio.tags:
-                    for tag in audio.tags:
-                        value = audio.tags[tag]
+            if audio is None:
+                return meta
+
+            if hasattr(audio, "info"):
+                info = audio.info
+                if hasattr(info, "length") and info.length:
+                    meta["AUDIO_Duration"] = cls._seconds_to_hms(info.length)
+                    meta["AUDIO_DurationSeconds"] = f"{info.length:.2f}"
+                if hasattr(info, "bitrate") and info.bitrate:
+                    br = info.bitrate
+                    meta["AUDIO_Bitrate"] = (
+                        f"{br // 1000} kbps" if br >= 1000 else f"{br} bps"
+                    )
+                if hasattr(info, "sample_rate") and info.sample_rate:
+                    meta["AUDIO_SampleRate"] = f"{info.sample_rate} Hz"
+                if hasattr(info, "channels") and info.channels:
+                    meta["AUDIO_Channels"] = str(info.channels)
+
+            if audio.tags:
+                for tag_name in audio.tags:
+                    try:
+                        values = audio.tags[tag_name]
+                        raw = values[0] if isinstance(values, list) else values
+                        value = str(raw)
                         if value:
-                            metadata[f"AUDIO_TAG_{tag}"] = str(value[0] if isinstance(value, list) else value)
-        except Exception as e:
-            logging.debug(f"Could not extract audio metadata from {file_path}: {e}")
-        
-        return metadata
-    
-    @staticmethod
-    def get_video_metadata(file_path: Path) -> Dict[str, Any]:
-        """
-        Extract metadata from video files using hachoir.
-        
-        Args:
-            file_path: Path to the video file
-            
-        Returns:
-            Dictionary containing video metadata
-        """
-        metadata = {}
-        try:
-            parser = createParser(str(file_path))
-            if parser:
-                with parser:
-                    extracted = extractMetadata(parser)
-                    if extracted:
-                        for line in extracted.exportPlaintext():
-                            if ":" in line:
-                                key, value = line.split(":", 1)
-                                metadata[f"VIDEO_{key.strip()}"] = value.strip()
-        except Exception as e:
-            logging.debug(f"Could not extract video metadata from {file_path}: {e}")
-        
-        return metadata
-    
-    @classmethod
-    def get_all_metadata(cls, file_path: Path) -> Dict[str, Any]:
-        """
-        Main method to extract metadata based on file extension.
-        
-        Args:
-            file_path: Path to the file
-            
-        Returns:
-            Dictionary containing all extracted metadata
-        """
-        all_metadata = {}
-        extension = file_path.suffix.lower()
-        
-        # Image files
-        if extension in cls.IMAGE_EXTENSIONS:
-            all_metadata.update(cls.get_image_metadata(file_path))
-        
-        # Audio files
-        elif extension in cls.AUDIO_EXTENSIONS:
-            all_metadata.update(cls.get_audio_metadata(file_path))
-        
-        # Video files
-        elif extension in cls.VIDEO_EXTENSIONS:
-            all_metadata.update(cls.get_video_metadata(file_path))
-        
-        # Basic file metadata (always included)
-        try:
-            stat_info = file_path.stat()
-            all_metadata.update({
-                "FILE_SIZE": f"{stat_info.st_size} bytes",
-                "CREATED": str(stat_info.st_ctime),
-                "MODIFIED": str(stat_info.st_mtime),
-                "FILE_EXTENSION": extension,
-            })
+                            meta[f"AUDIO_{tag_name}"] = value
+                    except Exception:
+                        continue
         except Exception:
             pass
-        
-        return all_metadata
+
+        return meta
+
+    # ------------------------------------------------------------------
+    # Video metadata (pymediainfo -> hachoir -> ffprobe)
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_video_metadata(cls, file_path: Path) -> Dict[str, Any]:
+        meta = {}
+
+        if MediaInfo is not None:
+            try:
+                mi = MediaInfo.parse(str(file_path))
+                for track in mi.tracks:
+                    prefix = f"VIDEO_{track.track_type.upper()}"
+                    for k, v in track.to_data().items():
+                        if v is not None and k != "track_type":
+                            clean_k = k.replace(" ", "_").replace("/", "_")
+                            meta[f"{prefix}_{clean_k}"] = str(v)
+                return meta
+            except Exception:
+                pass
+
+        if extractMetadata is not None and createParser is not None:
+            try:
+                parser = createParser(str(file_path))
+                if parser:
+                    with parser:
+                        extracted = extractMetadata(parser)
+                        if extracted:
+                            for line in extracted.exportPlaintext():
+                                if ":" in line:
+                                    k, v = line.split(":", 1)
+                                    meta[f"VIDEO_{k.strip().replace(' ', '_')}"] = (
+                                        v.strip()
+                                    )
+                    return meta
+            except Exception:
+                pass
+
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                    str(file_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if "format" in data:
+                    for k, v in data["format"].items():
+                        if v is not None:
+                            meta[f"VIDEO_FORMAT_{k}"] = str(v)
+                if "streams" in data:
+                    for i, stream in enumerate(data["streams"]):
+                        for k, v in stream.items():
+                            if v is not None and k != "disposition":
+                                meta[f"VIDEO_Stream{i}_{k}"] = str(v)
+        except Exception:
+            pass
+
+        return meta
+
+    # ------------------------------------------------------------------
+    # Document metadata
+    # ------------------------------------------------------------------
+    @staticmethod
+    def get_document_metadata(file_path: Path) -> Dict[str, Any]:
+        meta = {}
+        ext = file_path.suffix.lower()
+
+        try:
+            if ext == ".pdf" and pypdf is not None:
+                with open(file_path, "rb") as f:
+                    reader = pypdf.PdfReader(f)
+                meta["DOC_Pages"] = str(len(reader.pages))
+                info = reader.metadata
+                if info:
+                    for k, v in info.items():
+                        if v:
+                            key = k.replace("/", "_").strip()
+                            meta[f"DOC_{key}"] = str(v)
+
+            elif ext == ".docx" and docx is not None:
+                document = docx.Document(str(file_path))
+                props = document.core_properties
+                if props.author:
+                    meta["DOC_Author"] = props.author
+                if props.title:
+                    meta["DOC_Title"] = props.title
+                if props.created:
+                    meta["DOC_Created"] = str(props.created)
+                if props.modified:
+                    meta["DOC_Modified"] = str(props.modified)
+                if props.subject:
+                    meta["DOC_Subject"] = props.subject
+
+            elif ext == ".xlsx" and openpyxl is not None:
+                wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+                props = wb.properties
+                meta["DOC_Sheets"] = str(len(wb.sheetnames))
+                meta["DOC_SheetNames"] = ", ".join(wb.sheetnames[:20])
+                if len(wb.sheetnames) > 20:
+                    meta["DOC_SheetNames"] += f" ... (+{len(wb.sheetnames) - 20} more)"
+                if props.creator:
+                    meta["DOC_Author"] = props.creator
+                if props.title:
+                    meta["DOC_Title"] = props.title
+                if props.created:
+                    meta["DOC_Created"] = str(props.created)
+                if props.modified:
+                    meta["DOC_Modified"] = str(props.modified)
+                wb.close()
+        except Exception:
+            pass
+
+        return meta
+
+    # ------------------------------------------------------------------
+    # Basic file metadata
+    # ------------------------------------------------------------------
+    @staticmethod
+    def get_basic_metadata(file_path: Path) -> Dict[str, Any]:
+        meta = {}
+        try:
+            st = file_path.stat()
+            meta["FILE_Size"] = UniversalMetadataExtractor._format_size(st.st_size)
+            meta["FILE_SizeBytes"] = str(st.st_size)
+            meta["FILE_Created"] = datetime.fromtimestamp(st.st_ctime).isoformat()
+            meta["FILE_Modified"] = datetime.fromtimestamp(st.st_mtime).isoformat()
+            meta["FILE_Extension"] = file_path.suffix.lower()
+        except Exception:
+            pass
+        return meta
+
+    # ------------------------------------------------------------------
+    # Detection & dispatch
+    # ------------------------------------------------------------------
+    @staticmethod
+    def detect_mime_type(file_path: Path) -> Optional[str]:
+        if magic is not None:
+            try:
+                return magic.from_file(str(file_path), mime=True)
+            except Exception:
+                pass
+        return None
+
+    @classmethod
+    def classify_extension(cls, file_path: Path) -> str:
+        ext = file_path.suffix.lower()
+        for cat, exts in (
+            ("image", cls.IMAGE_EXTENSIONS),
+            ("audio", cls.AUDIO_EXTENSIONS),
+            ("video", cls.VIDEO_EXTENSIONS),
+            ("document", cls.DOCUMENT_EXTENSIONS),
+            ("raw", cls.RAW_EXTENSIONS),
+        ):
+            if ext in exts:
+                return cat
+        return "unknown"
+
+    @classmethod
+    def get_all_metadata(cls, file_path: Path) -> Dict[str, Any]:
+        meta = {}
+        ext = file_path.suffix.lower()
+
+        mime = cls.detect_mime_type(file_path)
+        if mime:
+            meta["FILE_MimeType"] = mime
+
+        if ext in cls.IMAGE_EXTENSIONS or ext in cls.RAW_EXTENSIONS:
+            meta.update(cls.get_image_metadata(file_path))
+        elif ext in cls.AUDIO_EXTENSIONS:
+            meta.update(cls.get_audio_metadata(file_path))
+        elif ext in cls.VIDEO_EXTENSIONS:
+            meta.update(cls.get_video_metadata(file_path))
+        elif ext in cls.DOCUMENT_EXTENSIONS:
+            meta.update(cls.get_document_metadata(file_path))
+
+        meta.update(cls.get_basic_metadata(file_path))
+        return meta
+
+
+# ============================================================================
+# OUTPUT WRITERS
+# ============================================================================
+
+
+def write_log_output(
+    results: List[Tuple[Path, str, Dict[str, Any]]], output_path: str
+) -> None:
+    results.sort(key=lambda r: (r[0].parent, r[1]))
+    with open(output_path, "w", encoding="utf-8") as f:
+        current_parent = None
+        for rel_path, filename, metadata in results:
+            parent = rel_path.parent
+            if parent != current_parent:
+                f.write(f"\n{'=' * 80}\n")
+                label = (
+                    "ROOT DIRECTORY" if str(parent) == "." else f"DIRECTORY: {parent}"
+                )
+                f.write(f"{label}\n")
+                f.write(f"{'=' * 80}\n")
+                current_parent = parent
+
+            f.write(f"\nFILE: {filename}\n")
+            f.write(f"PATH: {rel_path}\n")
+            if metadata:
+                f.write("METADATA:\n")
+                for key in sorted(metadata.keys()):
+                    value = str(metadata[key])
+                    if len(value) > 500:
+                        value = value[:497] + "..."
+                    f.write(f"  \u2022 {key}: {value}\n")
+            else:
+                f.write("  \u2022 No extractable metadata found\n")
+
+
+def write_json_output(
+    results: List[Tuple[Path, str, Dict[str, Any]]], output_path: str
+) -> None:
+    data = [
+        {"file": filename, "path": str(rel_path), "metadata": metadata}
+        for rel_path, filename, metadata in results
+    ]
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def write_csv_output(
+    results: List[Tuple[Path, str, Dict[str, Any]]], output_path: str
+) -> None:
+    all_keys = sorted({k for _, _, meta in results for k in meta})
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["File", "Path"] + all_keys)
+        for rel_path, filename, metadata in results:
+            writer.writerow(
+                [filename, str(rel_path)] + [metadata.get(k, "") for k in all_keys]
+            )
 
 
 # ============================================================================
 # FILE MANAGER
 # ============================================================================
 
+
 class FileManager:
-    """
-    Manages recursive file system traversal and metadata extraction.
-    Handles directory exploration and generates comprehensive reports.
-    """
-    
-    def __init__(self, base_folder: str):
-        """
-        Initialize FileManager with target directory.
-        
-        Args:
-            base_folder: Root directory to scan
-        """
+    def __init__(
+        self,
+        base_folder: str,
+        file_filter: str = "all",
+        dry_run: bool = False,
+        num_threads: int = 1,
+        show_progress: bool = False,
+    ):
         self.base_folder = Path(base_folder).resolve()
-        self.ignored_dirs = {'.git', '__pycache__', '.venv', 'node_modules'}
-        self.ignored_files = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
-    
-    def should_skip(self, path: Path) -> bool:
-        """
-        Determine if a file or directory should be skipped.
-        
-        Args:
-            path: Path to check
-            
-        Returns:
-            True if should be skipped, False otherwise
-        """
-        # Skip hidden files and directories
-        if any(part.startswith('.') for part in path.parts):
+        self.dry_run = dry_run
+        self.num_threads = (os.cpu_count() or 1) if num_threads <= 0 else num_threads
+        self.show_progress = show_progress
+        self.ignored_dirs = {
+            ".git",
+            "__pycache__",
+            ".venv",
+            "node_modules",
+            ".mypy_cache",
+            ".pytest_cache",
+        }
+        self.ignored_files = {".DS_Store", "Thumbs.db", "desktop.ini"}
+        self.valid_extensions = UniversalMetadataExtractor.TYPE_FILTERS.get(file_filter)
+
+    def _should_skip(self, path: Path) -> bool:
+        if any(part.startswith(".") for part in path.parts):
             return True
-        
-        # Skip ignored directories
         if path.is_dir() and path.name in self.ignored_dirs:
             return True
-        
-        # Skip ignored files
         if path.is_file() and path.name in self.ignored_files:
             return True
-        
         return False
-    
-    def run(self, process_logger: logging.Logger, metadata_logger: logging.Logger) -> None:
-        """
-        Main execution method - recursively scans directory and extracts metadata.
-        
-        Args:
-            process_logger: Logger for process information
-            metadata_logger: Logger for metadata output
-        """
-        process_logger.info(f"Starting deep exploration of: {self.base_folder}")
-        process_logger.info(f"Metadata report will be saved to: metadata_report.log")
-        
-        file_count = 0
-        supported_files = 0
-        
-        # Recursive directory walk
-        for root, dirs, files in os.walk(self.base_folder, topdown=True):
-            current_path = Path(root)
-            
-            # Filter out ignored directories
-            dirs[:] = [d for d in dirs if not self.should_skip(current_path / d)]
-            
-            # Skip this directory if it should be ignored
-            if self.should_skip(current_path):
+
+    def _collect_files(self) -> List[Path]:
+        files = []
+        for root, dirs, filenames in os.walk(self.base_folder, topdown=True):
+            current = Path(root)
+            dirs[:] = [d for d in dirs if not self._should_skip(current / d)]
+            if self._should_skip(current):
                 continue
-            
-            relative_path = current_path.relative_to(self.base_folder)
-            
-            # Log directory header
-            if str(relative_path) != '.':
-                metadata_logger.info(f"\n{'='*80}")
-                metadata_logger.info(f"DIRECTORY: {relative_path}")
-                metadata_logger.info(f"{'='*80}")
-            
-            # Process files in current directory
-            for filename in sorted(files):
-                file_path = current_path / filename
-                file_count += 1
-                
-                # Skip ignored files
-                if self.should_skip(file_path):
+            for name in sorted(filenames):
+                fp = current / name
+                if self._should_skip(fp):
                     continue
-                
-                # Skip the script itself and log files
-                if filename == Path(__file__).name or filename.endswith('.log'):
+                if name == Path(__file__).name or name.endswith(
+                    (".log", ".json", ".csv")
+                ):
                     continue
-                
-                # Extract metadata
-                metadata = UniversalMetadataExtractor.get_all_metadata(file_path)
-                
-                # Log file information
-                metadata_logger.info(f"\nFILE: {filename}")
-                metadata_logger.info(f"PATH: {relative_path / filename}")
-                
-                if metadata:
-                    supported_files += 1
-                    metadata_logger.info("METADATA:")
-                    for key in sorted(metadata.keys()):
-                        value = str(metadata[key])
-                        # Truncate very long values
-                        if len(value) > 500:
-                            value = value[:497] + "..."
-                        metadata_logger.info(f"  • {key}: {value}")
-                else:
-                    metadata_logger.info("  • No extractable metadata found")
-        
-        # Summary
-        process_logger.info(f"\n{'='*60}")
-        process_logger.info("SCAN COMPLETE")
-        process_logger.info(f"{'='*60}")
-        process_logger.info(f"Total files scanned: {file_count}")
-        process_logger.info(f"Files with metadata extracted: {supported_files}")
-        process_logger.info(f"Metadata report saved to: metadata_report.log")
+                if (
+                    self.valid_extensions is not None
+                    and fp.suffix.lower() not in self.valid_extensions
+                ):
+                    continue
+                files.append(fp)
+        return files
+
+    def _process_file(self, file_path: Path) -> Tuple[Path, str, Dict[str, Any]]:
+        rel = file_path.relative_to(self.base_folder)
+        if self.dry_run:
+            return rel, file_path.name, {}
+        return (
+            rel,
+            file_path.name,
+            UniversalMetadataExtractor.get_all_metadata(file_path),
+        )
+
+    def run(self, log: logging.Logger) -> List[Tuple[Path, str, Dict[str, Any]]]:
+        log.info(f"Starting exploration of: {self.base_folder}")
+        if self.dry_run:
+            log.info("DRY RUN MODE \u2013 no metadata will be extracted")
+
+        log.info("Scanning directory for supported files...")
+        files = self._collect_files()
+        total = len(files)
+        log.info(f"Found {total} supported file(s)")
+
+        if total == 0:
+            return []
+
+        if self.dry_run:
+            log.info("Files that would be processed:")
+            for f in files:
+                log.info(f"  \u2022 {f.relative_to(self.base_folder)}")
+            return []
+
+        results: List[Tuple[Path, str, Dict[str, Any]]] = []
+        progress = None
+
+        if self.show_progress and tqdm is not None:
+            progress = tqdm(total=total, unit="file", desc="Extracting")
+
+        if self.num_threads > 1:
+            with ThreadPoolExecutor(max_workers=self.num_threads) as pool:
+                futs = {pool.submit(self._process_file, f): f for f in files}
+                for future in as_completed(futs):
+                    f = futs[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        rel = f.relative_to(self.base_folder)
+                        log.warning(f"Error processing {rel}: {e}")
+                        results.append((rel, f.name, {}))
+                    if progress:
+                        progress.update(1)
+        else:
+            for fp in files:
+                try:
+                    results.append(self._process_file(fp))
+                except Exception as e:
+                    rel = fp.relative_to(self.base_folder)
+                    log.warning(f"Error processing {rel}: {e}")
+                    results.append((rel, fp.name, {}))
+                if progress:
+                    progress.update(1)
+
+        if progress:
+            progress.close()
+
+        supported = sum(1 for _, _, m in results if m)
+        log.info(f"\n{'=' * 60}")
+        log.info("SCAN COMPLETE")
+        log.info(f"{'=' * 60}")
+        log.info(f"Files processed: {len(results)}")
+        log.info(f"Files with metadata: {supported}")
+
+        return results
 
 
 # ============================================================================
-# MAIN EXECUTION
+# CLI
 # ============================================================================
 
-def main():
-    """Main entry point for the script."""
-    # Setup logging
-    process_logger, metadata_logger = setup_logging()
-    
-    # Get target directory from command line or use current directory
-    if len(sys.argv) > 1:
-        target_dir = sys.argv[1]
-    else:
-        target_dir = "."
-    
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="universal",
+        description="Universal Metadata Extractor \u2013 extract metadata from images, audio, video, and documents",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  %(prog)s                                          Scan current directory
+  %(prog)s ~/Pictures                               Scan specific directory
+  %(prog)s ~/Pictures --format json                 JSON output
+  %(prog)s ~/Pictures --format csv -o report.csv    CSV output
+  %(prog)s ~/Pictures --type images                 Images only
+  %(prog)s ~/Pictures --progress                    Show progress bar
+  %(prog)s ~/Pictures --threads 4                   Use 4 threads
+  %(prog)s ~/Pictures --dry-run                     List files only
+""",
+    )
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="Directory to scan (default: current directory)",
+    )
+    parser.add_argument(
+        "-o", "--output", help="Output file path (default: metadata_report.{format})"
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["log", "json", "csv"],
+        default="log",
+        help="Output format (default: log)",
+    )
+    parser.add_argument(
+        "-t",
+        "--type",
+        choices=["all", "images", "audio", "video", "documents"],
+        default="all",
+        help="Filter by file type (default: all)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="List files without extracting metadata"
+    )
+    parser.add_argument(
+        "-p", "--progress", action="store_true", help="Show progress bar"
+    )
+    parser.add_argument(
+        "-n",
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of worker threads (0=auto, default: 1)",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Verbose debug output"
+    )
+    return parser.parse_args(argv)
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
+    log = setup_logging(verbose=args.verbose)
+
+    target = Path(args.directory)
+    if not target.exists():
+        log.error(f"Directory does not exist: {args.directory}")
+        sys.exit(1)
+    if not target.is_dir():
+        log.error(f"Not a directory: {args.directory}")
+        sys.exit(1)
+
+    output = args.output or f"metadata_report.{args.format}"
+
+    manager = FileManager(
+        base_folder=args.directory,
+        file_filter=args.type,
+        dry_run=args.dry_run,
+        num_threads=args.threads,
+        show_progress=args.progress,
+    )
+
     try:
-        # Validate directory
-        target_path = Path(target_dir)
-        if not target_path.exists():
-            process_logger.error(f"Directory does not exist: {target_dir}")
-            sys.exit(1)
-        
-        if not target_path.is_dir():
-            process_logger.error(f"Path is not a directory: {target_dir}")
-            sys.exit(1)
-        
-        # Run metadata extraction
-        manager = FileManager(target_dir)
-        manager.run(process_logger, metadata_logger)
-        
-        process_logger.info("\n✅ Process completed successfully!")
-        
+        results = manager.run(log)
+
+        if results and not args.dry_run:
+            log.info(f"Writing {args.format.upper()} report to {output} ...")
+            if args.format == "log":
+                write_log_output(results, output)
+            elif args.format == "json":
+                write_json_output(results, output)
+            else:
+                write_csv_output(results, output)
+            log.info("Done!")
     except KeyboardInterrupt:
-        process_logger.info("\n\n⚠️  Process interrupted by user")
+        log.warning("Interrupted by user")
         sys.exit(130)
     except Exception as e:
-        process_logger.error(f"\n❌ Error during execution: {e}")
+        log.exception(f"Fatal error: {e}")
         sys.exit(1)
 
 
