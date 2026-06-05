@@ -1,9 +1,29 @@
 # Metadata Explorer Dependencies
-exifread==3.0.0
-mutagen==1.47.0
-hachoir==3.2.0
-Pillow==10.0.0
 
-# Development (optional)
-pytest==7.4.0
-black==23.9.0
+## Core
+exifread>=3.0.0
+mutagen>=1.47.0
+Pillow>=10.0.0
+
+## Image
+pillow-heif>=0.13.0
+
+## Audio (included in mutagen)
+## Video (try pymediainfo first, falls back to hachoir)
+pymediainfo>=6.1.0
+hachoir>=3.2.0
+
+## MIME detection
+python-magic>=0.4.27
+
+## Documents
+pypdf>=3.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+
+## Performance / UX
+tqdm>=4.66.0
+
+## Development (optional)
+pytest>=7.4.0
+black>=23.9.0
