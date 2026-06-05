@@ -181,9 +181,7 @@ metadata-explorer/
 ├── LICENSE               # GNU GPLv3 license
 ├── __init__.py           # Package init
 ├── metadata_report.log   # Generated report (example)
-├── files/                # Default input folder (auto-scanned)
-└── examples/
-    └── sample_scan/      # Example directory structure
+└── files/                # Default input folder (auto-scanned)
 ```
 
 ## 🤝 Contributing
