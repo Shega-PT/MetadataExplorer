@@ -704,27 +704,29 @@ class FileManager:
 # ============================================================================
 
 
+DEFAULT_SUBFOLDER = "files"
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="universal",
         description="Universal Metadata Extractor \u2013 extract metadata from images, audio, video, and documents",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  %(prog)s                                          Scan current directory
+  %(prog)s                                          Scan 'files/' subfolder or prompt
   %(prog)s ~/Pictures                               Scan specific directory
-  %(prog)s ~/Pictures --format json                 JSON output
-  %(prog)s ~/Pictures --format csv -o report.csv    CSV output
-  %(prog)s ~/Pictures --type images                 Images only
-  %(prog)s ~/Pictures --progress                    Show progress bar
-  %(prog)s ~/Pictures --threads 4                   Use 4 threads
-  %(prog)s ~/Pictures --dry-run                     List files only
+  %(prog)s files --format json                      JSON output
+  %(prog)s files --format csv -o report.csv          CSV output
+  %(prog)s files --type images                      Images only
+  %(prog)s files --progress --threads 4             Progress + 4 threads
+  %(prog)s files --dry-run                          List files only
 """,
     )
     parser.add_argument(
         "directory",
         nargs="?",
-        default=".",
-        help="Directory to scan (default: current directory)",
+        default=None,
+        help=f"Directory to scan (default: looks for '{DEFAULT_SUBFOLDER}/' subfolder, or prompts interactively)",
     )
     parser.add_argument(
         "-o", "--output", help="Output file path (default: metadata_report.{format})"
@@ -767,22 +769,49 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 # ============================================================================
 
 
+def resolve_target_directory(args: argparse.Namespace, log: logging.Logger) -> Path:
+    if args.directory is not None:
+        target = Path(args.directory)
+        if not target.exists():
+            log.error(f"Directory does not exist: {args.directory}")
+            sys.exit(1)
+        if not target.is_dir():
+            log.error(f"Not a directory: {args.directory}")
+            sys.exit(1)
+        return target
+
+    subfolder = Path(DEFAULT_SUBFOLDER)
+    if subfolder.exists() and subfolder.is_dir() and any(subfolder.iterdir()):
+        log.info(f"Found '{DEFAULT_SUBFOLDER}/' subfolder with content")
+        return subfolder
+
+    while True:
+        raw = input(
+            f"No '{DEFAULT_SUBFOLDER}/' subfolder found. Enter directory path to scan (or 'q' to quit): "
+        ).strip()
+        if raw.lower() in ("q", "quit", ""):
+            log.info("Aborted by user")
+            sys.exit(0)
+        target = Path(raw).resolve()
+        if not target.exists():
+            print(f"  Path does not exist: {raw}")
+            continue
+        if not target.is_dir():
+            print(f"  Not a directory: {raw}")
+            continue
+        return target
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     log = setup_logging(verbose=args.verbose)
 
-    target = Path(args.directory)
-    if not target.exists():
-        log.error(f"Directory does not exist: {args.directory}")
-        sys.exit(1)
-    if not target.is_dir():
-        log.error(f"Not a directory: {args.directory}")
-        sys.exit(1)
+    target = resolve_target_directory(args, log)
 
     output = args.output or f"metadata_report.{args.format}"
 
     manager = FileManager(
-        base_folder=args.directory,
+        base_folder=str(target),
         file_filter=args.type,
         dry_run=args.dry_run,
         num_threads=args.threads,
