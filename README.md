@@ -49,13 +49,25 @@ A powerful, cross-platform Python tool for deep metadata extraction from various
 
 ### Basic Usage
 
-Scan the current directory:
+**No arguments** — scans the `files/` subfolder if it exists and has content; otherwise prompts for a path:
 
 ```bash
 python universal.py
 ```
 
-Scan a specific directory:
+```
+No 'files/' subfolder found. Enter directory path to scan (or 'q' to quit):
+```
+
+Place your files in a `files/` folder and run without arguments:
+
+```bash
+mkdir -p files
+cp ~/photo.jpg files/
+python universal.py
+```
+
+Scan a specific directory explicitly:
 
 ```bash
 python universal.py /path/to/your/files
@@ -72,13 +84,13 @@ python universal.py ~/Pictures
 JSON output:
 
 ```bash
-python universal.py ~/Pictures --format json
+python universal.py files --format json
 ```
 
 CSV output:
 
 ```bash
-python universal.py ~/Pictures --format csv -o report.csv
+python universal.py files --format csv -o report.csv
 ```
 
 ### Advanced Usage
@@ -86,26 +98,26 @@ python universal.py ~/Pictures --format csv -o report.csv
 Filter by file type:
 
 ```bash
-python universal.py ~/Pictures --type images
+python universal.py files --type images
 ```
 
 With progress bar and 4 threads:
 
 ```bash
-python universal.py ~/Pictures --progress --threads 4
+python universal.py files --progress --threads 4
 ```
 
 Dry-run (list files only):
 
 ```bash
-python universal.py ~/Pictures --dry-run
+python universal.py files --dry-run
 ```
 
 ### Options
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `directory` | Directory to scan | `.` (current) |
+| `directory` | Directory to scan | `files/` subfolder, or prompts interactively |
 | `-o, --output` | Output file path | `metadata_report.{format}` |
 | `-f, --format` | Output format: `log`, `json`, `csv` | `log` |
 | `-t, --type` | File type filter: `all`, `images`, `audio`, `video`, `documents` | `all` |
@@ -169,6 +181,7 @@ metadata-explorer/
 ├── LICENSE               # GNU GPLv3 license
 ├── __init__.py           # Package init
 ├── metadata_report.log   # Generated report (example)
+├── files/                # Default input folder (auto-scanned)
 └── examples/
     └── sample_scan/      # Example directory structure
 ```
